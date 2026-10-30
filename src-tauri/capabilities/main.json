@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Assistant UI. No camera/microphone or filesystem/network plugin access; Rust commands contact the fixed official DeepSeek endpoint.",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
+}
