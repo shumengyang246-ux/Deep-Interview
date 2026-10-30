@@ -27,6 +27,7 @@ async function nativeMock(page: Page, hasKey = true, delayAck = false) {
       w.promptPreview = "你是一位可靠的私人 AI 助手。";
       const settings = () => ({
         thinking: localStorage.getItem("mockThinking") || "off",
+        webSearch: localStorage.getItem("mockWebSearch") === "true",
         promptPath: "C:\\Deep-Interview\\system-prompt.txt",
         promptCharacters: w.promptPreview.length,
         promptPreview: w.promptPreview,
@@ -68,11 +69,18 @@ async function nativeMock(page: Page, hasKey = true, delayAck = false) {
             localStorage.setItem("mockThinking", args.thinking);
             return settings();
           }
+          if (cmd === "set_web_search") {
+            if (w.failSave) throw "无法保存联网设置。";
+            localStorage.setItem("mockWebSearch", String(args.enabled));
+            return settings();
+          }
+          if (cmd === "open_source") w.openedSource = args.url;
           if (cmd === "open_system_prompt") w.openedPrompt = true;
           if (cmd === "save_api_key") hasKey = true;
           if (cmd === "delete_api_key") hasKey = false;
           if (cmd === "start_chat") {
             args.effectiveThinking = settings().thinking;
+            args.effectiveWebSearch = settings().webSearch;
             w.requests.push(args);
             if (delayAck)
               await new Promise((resolve) => {
@@ -112,6 +120,195 @@ async function sendQuestion(page: Page, text: string) {
   await page.getByRole("textbox", { name: "消息输入" }).fill(text);
   await page.getByRole("textbox", { name: "消息输入" }).press("Enter");
 }
+
+test("web search toggle sits at bottom left, persists, and does not enable on failed save", async ({
+  page,
+}) => {
+  await nativeMock(page);
+  const toggle = page.getByRole("switch", { name: "联网搜索" });
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await sendQuestion(page, "不联网的问题");
+  expect(
+    await page.evaluate(() => (window as any).requests[0].effectiveWebSearch),
+  ).toBe(false);
+  await emit(page, 0, "delta", "普通回答");
+  await emit(page, 0, "done");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  await page.reload();
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  await page.evaluate(() => {
+    (window as any).failSave = true;
+  });
+  await toggle.click();
+  await expect(page.getByRole("alert")).toContainText("无法保存联网设置");
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  await page.setViewportSize({ width: 360, height: 540 });
+  const toggleBox = (await toggle.boundingBox())!;
+  const inputBox = (await page
+    .getByRole("textbox", { name: "消息输入" })
+    .boundingBox())!;
+  const sendBox = (await page
+    .getByRole("button", { name: "发送消息" })
+    .boundingBox())!;
+  expect(toggleBox.y).toBeGreaterThanOrEqual(inputBox.y + inputBox.height);
+  expect(toggleBox.x + toggleBox.width).toBeLessThan(sendBox.x);
+  expect(toggleBox.y + toggleBox.height).toBeLessThan(540);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
+    360,
+  );
+});
+
+test("web search shows progress, saves sources, opens a source and keeps follow-up citations", async ({
+  page,
+}) => {
+  await nativeMock(page);
+  await page.getByRole("switch", { name: "联网搜索" }).click();
+  await sendQuestion(page, "查询 Rust 官方信息");
+  expect(
+    await page.evaluate(() => (window as any).requests[0].effectiveWebSearch),
+  ).toBe(true);
+  await expect(page.getByRole("switch", { name: "联网搜索" })).toBeDisabled();
+  await emit(page, 0, "search_status", "正在搜索：Rust 官方信息");
+  await expect(
+    page.getByText("正在搜索：Rust 官方信息", { exact: true }),
+  ).toBeVisible();
+  await page.screenshot({ path: "artifacts/local/web-search-progress.png" });
+  const sources = [
+    {
+      id: 1,
+      title: "Rust 官方网站",
+      url: "https://www.rust-lang.org/",
+      snippet: "可靠的官方来源",
+    },
+  ];
+  await emit(page, 0, "sources", JSON.stringify(sources));
+  await emit(page, 0, "search_complete", "已检索 1 次 · 找到 1 个来源");
+  await emit(
+    page,
+    0,
+    "delta",
+    "根据 Rust 官方资料，Rust 注重可靠性与效率。[1]",
+  );
+  await emit(page, 0, "done");
+  await expect(
+    page.getByText("正在搜索：Rust 官方信息", { exact: true }),
+  ).toHaveCount(0);
+  await page.getByText("参考来源 · 1", { exact: false }).click();
+  await page.getByRole("button", { name: "打开来源 1：Rust 官方网站" }).click();
+  expect(await page.evaluate(() => (window as any).openedSource)).toBe(
+    sources[0].url,
+  );
+  await page.getByRole("button", { name: "复制链接", exact: true }).click();
+  expect(await page.evaluate(() => (window as any).clipboardText)).toBe(
+    sources[0].url,
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as any).savedArchive?.sessions[0].messages[1].sources,
+      ),
+    )
+    .toEqual(sources);
+  await page.screenshot({ path: "artifacts/local/web-search-answer.png" });
+  await page.reload();
+  await page.getByText("参考来源 · 1", { exact: false }).click();
+  await expect(
+    page.getByRole("button", { name: "打开来源 1：Rust 官方网站" }),
+  ).toBeVisible();
+  await sendQuestion(page, "上面的来源链接是什么？");
+  const messages = await page.evaluate(
+    () => (window as any).requests[0].messages,
+  );
+  expect(messages[1].content).toContain(sources[0].url);
+  await page.getByRole("button", { name: "停止生成" }).click();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("combobox", { name: "外观主题" }).selectOption("dark");
+  await page.getByRole("button", { name: "对话", exact: true }).click();
+  await page.setViewportSize({ width: 360, height: 540 });
+  await page.screenshot({ path: "artifacts/local/web-search-dark-small.png" });
+});
+
+test("search cancellation ignores stale sources and a new session starts without evidence", async ({
+  page,
+}) => {
+  await nativeMock(page);
+  await page.getByRole("switch", { name: "联网搜索" }).click();
+  await sendQuestion(page, "搜索中断");
+  await emit(page, 0, "search_status", "正在搜索：测试");
+  await page.getByRole("button", { name: "停止生成" }).click();
+  await expect(page.getByText("已停止", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "新对话" }).click();
+  await sendQuestion(page, "新问题");
+  await emit(
+    page,
+    0,
+    "sources",
+    JSON.stringify([
+      { id: 1, title: "旧来源", url: "https://example.com/old", snippet: "旧" },
+    ]),
+  );
+  await emit(page, 0, "search_complete", "旧搜索完成");
+  await expect(page.getByText("参考来源 · 1", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("旧搜索完成")).toHaveCount(0);
+  const requests = await page.evaluate(() => (window as any).requests);
+  expect(requests[1].messages).toEqual([{ role: "user", content: "新问题" }]);
+});
+
+test("search error stays actionable and retry can explicitly disable networking", async ({
+  page,
+}) => {
+  await nativeMock(page);
+  const toggle = page.getByRole("switch", { name: "联网搜索" });
+  await toggle.click();
+  await sendQuestion(page, "搜索失败后重试");
+  await emit(page, 0, "search_status", "正在分析检索问题…");
+  await emit(page, 0, "error", "联网检索失败：请求过于频繁（HTTP 429）");
+  await expect(page.getByRole("alert")).toContainText("联网检索失败");
+  expect(await page.evaluate(() => (window as any).requests.length)).toBe(1);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await page.getByRole("button", { name: "重新生成" }).click();
+  expect(
+    await page.evaluate(() => (window as any).requests[1].effectiveWebSearch),
+  ).toBe(false);
+  await emit(page, 1, "delta", "不联网回答");
+  await emit(page, 1, "done");
+  await expect(page.locator(".message.user")).toHaveCount(1);
+  await expect(
+    page.getByText("正在分析检索问题…", { exact: true }),
+  ).toHaveCount(0);
+  await expect(page.locator(".search-sources")).toHaveCount(0);
+});
+
+test("empty search results are disclosed and unsafe source events stop the request", async ({
+  page,
+}) => {
+  await nativeMock(page);
+  await page.getByRole("switch", { name: "联网搜索" }).click();
+  await sendQuestion(page, "没有结果的问题");
+  await emit(page, 0, "sources", "[]");
+  await emit(page, 0, "search_complete", "未找到可用来源，将说明信息限制");
+  await emit(page, 0, "delta", "没有检索到可用资料，无法确认。");
+  await emit(page, 0, "done");
+  await expect(
+    page.getByText("未找到可用来源，将说明信息限制", { exact: true }),
+  ).toBeVisible();
+  await sendQuestion(page, "坏来源");
+  await emit(
+    page,
+    1,
+    "sources",
+    JSON.stringify([
+      { id: 1, title: "bad", url: "javascript:alert(1)", snippet: "bad" },
+    ]),
+  );
+  await expect(page.getByRole("alert")).toContainText("检索来源格式无效");
+  expect(await page.evaluate(() => (window as any).cancelled.length)).toBe(1);
+  await expect(
+    page.getByRole("button", { name: "打开来源 1：bad" }),
+  ).toHaveCount(0);
+});
 
 test("memory checkpoint survives reload, stays per-session and does not replace transcript", async ({
   page,

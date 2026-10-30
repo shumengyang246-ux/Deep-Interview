@@ -41,7 +41,7 @@ export function ModelSettings({
       <p>
         官方模型标识：deepseek-flash
         <br />
-        可选思考程度 · 流式输出 · 自动整理会话记忆
+        可选思考程度 · 流式输出 · 联网检索 · 会话记忆
       </p>
       <label htmlFor="api-key">
         API Key{" "}
@@ -86,7 +86,8 @@ export function ModelSettings({
       )}
       <p className="api-footnote">
         仅发送系统提示词、你提交的文字与对话上下文到 DeepSeek
-        官网。不采集屏幕、摄像头或麦克风。历史会话保存在本机，可在「历史」中删除。
+        官网。开启联网后，还会向其搜索接口发送模型生成的检索词。
+        不采集屏幕、摄像头或麦克风。历史会话保存在本机，可在「历史」中删除。
       </p>
     </div>
   );

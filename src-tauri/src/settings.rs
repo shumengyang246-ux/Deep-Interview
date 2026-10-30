@@ -42,20 +42,23 @@ impl Thinking {
         }
     }
 }
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 struct Preferences {
     #[serde(default)]
     thinking: Thinking,
+    #[serde(default, rename = "webSearch")]
+    web_search: bool,
 }
 pub struct AssistantConfig {
     pub prompt_path: PathBuf,
     preferences_path: PathBuf,
-    thinking: Mutex<Thinking>,
+    preferences: Mutex<Preferences>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsInfo {
     thinking: Thinking,
+    web_search: bool,
     prompt_path: String,
     prompt_characters: Option<usize>,
     prompt_preview: String,
@@ -115,15 +118,19 @@ impl AssistantConfig {
         Ok(Self {
             prompt_path,
             preferences_path,
-            thinking: Mutex::new(preferences.thinking),
+            preferences: Mutex::new(preferences),
         })
     }
-    pub fn snapshot(&self) -> Result<(Thinking, String), String> {
-        let thinking = *self.thinking.lock().map_err(|_| "助手设置状态异常。")?;
-        Ok((thinking, read_prompt(&self.prompt_path)?))
+    pub fn snapshot(&self) -> Result<(Thinking, String, bool), String> {
+        let prefs = self.preferences.lock().map_err(|_| "助手设置状态异常。")?;
+        Ok((
+            prefs.thinking,
+            read_prompt(&self.prompt_path)?,
+            prefs.web_search,
+        ))
     }
     fn info(&self) -> Result<SettingsInfo, String> {
-        let thinking = *self.thinking.lock().map_err(|_| "助手设置状态异常。")?;
+        let prefs = self.preferences.lock().map_err(|_| "助手设置状态异常。")?;
         let (prompt_characters, prompt_preview, prompt_error) = match read_prompt(&self.prompt_path)
         {
             Ok(text) => (
@@ -134,7 +141,8 @@ impl AssistantConfig {
             Err(e) => (None, String::new(), Some(e)),
         };
         Ok(SettingsInfo {
-            thinking,
+            thinking: prefs.thinking,
+            web_search: prefs.web_search,
             prompt_path: self.prompt_path.to_string_lossy().into_owned(),
             prompt_characters,
             prompt_preview,
@@ -142,13 +150,17 @@ impl AssistantConfig {
         })
     }
     fn save_thinking(&self, thinking: Thinking) -> Result<(), String> {
-        let mut current = self.thinking.lock().map_err(|_| "助手设置状态异常。")?;
-        let bytes = serde_json::to_vec_pretty(&Preferences { thinking })
-            .map_err(|_| "无法编码助手设置。")?;
-        let temp = self.preferences_path.with_extension("tmp");
-        fs::write(&temp, bytes).map_err(|_| "无法保存思考程度。")?;
-        fs::rename(&temp, &self.preferences_path).map_err(|_| "无法更新助手设置文件。")?;
-        *current = thinking;
+        self.update(|prefs| prefs.thinking = thinking)
+    }
+    fn save_web_search(&self, enabled: bool) -> Result<(), String> {
+        self.update(|prefs| prefs.web_search = enabled)
+    }
+    fn update(&self, change: impl FnOnce(&mut Preferences)) -> Result<(), String> {
+        let mut current = self.preferences.lock().map_err(|_| "助手设置状态异常。")?;
+        let mut next = current.clone();
+        change(&mut next);
+        crate::storage::write_json(&self.preferences_path, &next, 16384)?;
+        *current = next;
         Ok(())
     }
 }
@@ -162,6 +174,14 @@ pub fn set_thinking(
     config: State<AssistantConfig>,
 ) -> Result<SettingsInfo, String> {
     config.save_thinking(thinking)?;
+    config.info()
+}
+#[tauri::command]
+pub fn set_web_search(
+    enabled: bool,
+    config: State<AssistantConfig>,
+) -> Result<SettingsInfo, String> {
+    config.save_web_search(enabled)?;
     config.info()
 }
 #[tauri::command]
@@ -234,6 +254,25 @@ mod tests {
         config.save_thinking(Thinking::Max).unwrap();
         let restarted = AssistantConfig::new(path, &dir).unwrap();
         assert_eq!(restarted.snapshot().unwrap().0, Thinking::Max);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn search_preference_migrates_persists_and_rolls_back_on_write_failure() {
+        let dir = temp_dir();
+        let path = dir.join("system-prompt.txt");
+        let prefs = dir.join("assistant-settings.json");
+        fs::write(&prefs, r#"{"thinking":"high"}"#).unwrap();
+        let config = AssistantConfig::new(path.clone(), &dir).unwrap();
+        assert!(!config.snapshot().unwrap().2);
+        config.save_web_search(true).unwrap();
+        config.save_thinking(Thinking::Low).unwrap();
+        let restored = AssistantConfig::new(path, &dir).unwrap();
+        assert!(restored.snapshot().unwrap().2);
+        assert_eq!(restored.snapshot().unwrap().0, Thinking::Low);
+        fs::remove_file(&prefs).unwrap();
+        fs::create_dir(&prefs).unwrap();
+        assert!(restored.save_web_search(false).is_err());
+        assert!(restored.snapshot().unwrap().2);
         fs::remove_dir_all(dir).unwrap();
     }
 }

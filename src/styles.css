@@ -328,6 +328,108 @@ textarea::placeholder {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
+}
+.web-search-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.web-search-toggle.enabled {
+  background: var(--tint);
+  border-color: #7e9e83;
+  color: var(--text);
+}
+.web-search-toggle:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.web-search-toggle:focus-visible,
+.source-link:focus-visible {
+  outline: 2px solid #638c74;
+  outline-offset: 2px;
+}
+.search-toggle-state {
+  font-size: 9px;
+  opacity: 0.8;
+}
+.search-sources {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: var(--tint);
+  font-size: 11px;
+}
+.search-sources summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.search-sources summary > span {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--muted);
+}
+.search-sources ol {
+  padding-left: 22px;
+  margin: 12px 0 0;
+}
+.search-sources li {
+  padding: 0 0 12px 2px;
+}
+.search-sources li:last-child {
+  padding-bottom: 0;
+}
+.source-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.source-link:hover {
+  text-decoration: underline;
+}
+.source-link span {
+  overflow-wrap: anywhere;
+}
+.source-link svg {
+  flex-shrink: 0;
+}
+.source-url {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 9px;
+  margin: 3px 0;
+}
+.search-sources li p {
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--muted);
+  margin: 5px 0;
+}
+.search-note {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  margin: 10px 0 0;
 }
 .model-label {
   display: flex;

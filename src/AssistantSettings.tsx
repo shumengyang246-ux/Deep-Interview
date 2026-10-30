@@ -3,6 +3,7 @@ import { command, desktop } from "./native";
 export type Thinking = "off" | "low" | "high" | "max";
 export type AssistantSettingsInfo = {
   thinking: Thinking;
+  webSearch: boolean;
   promptPath: string;
   promptCharacters: number | null;
   promptPreview: string;

@@ -17,6 +17,7 @@ mod memory;
 mod settings;
 mod storage;
 mod ui_state;
+mod web_search;
 
 struct RuntimeState {
     shortcut_error: Option<String>,
@@ -226,7 +227,9 @@ fn main() {
             llm::cancel_chat,
             settings::assistant_settings,
             settings::set_thinking,
+            settings::set_web_search,
             settings::open_system_prompt,
+            web_search::open_source,
             history::load_conversations,
             history::save_conversations,
             ui_state::ui_settings,

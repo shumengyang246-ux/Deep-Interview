@@ -1,6 +1,7 @@
 use crate::credentials;
 use crate::memory::{self, Memory};
 use crate::settings::{AssistantConfig, Thinking};
+use crate::web_search;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::{sync::Mutex, time::Duration};
@@ -8,7 +9,7 @@ use tauri::{ipc::Channel, Manager, State};
 use tokio_util::sync::CancellationToken;
 
 pub const MODEL: &str = "deepseek-flash";
-const ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
+pub(crate) const ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
 #[derive(Default)]
 pub struct ChatState(pub Mutex<Option<(String, CancellationToken)>>);
 #[derive(Clone, Deserialize, Serialize)]
@@ -76,7 +77,7 @@ pub fn start_chat(
     }
     let key = credentials::read()?.ok_or("请先在设置中保存 DeepSeek API Key。")?;
     // Snapshot configuration once per request; reread the prompt file on every new turn.
-    let (thinking, system_prompt) = config.snapshot()?;
+    let (thinking, system_prompt, web_search) = config.snapshot()?;
     let token = CancellationToken::new();
     {
         let mut active = state.0.lock().map_err(|_| "请求状态异常")?;
@@ -89,7 +90,7 @@ pub fn start_chat(
         let result = tokio::select! {
             biased;
             _ = token.cancelled() => Ok("cancelled".to_string()),
-            result = run_chat(&key, &messages, prior_memory, thinking, &system_prompt, |kind, text| {
+            result = run_chat(&key, &messages, prior_memory, thinking, &system_prompt, web_search, |kind, text| {
                 on_event.send(StreamEvent { request_id: request_id.clone(), kind: kind.into(), text }).map_err(|_| "窗口已断开，回答已停止。".to_string())
             }) => result,
         };
@@ -154,14 +155,29 @@ async fn run_chat(
     prior: Option<Memory>,
     thinking: Thinking,
     system_prompt: &str,
+    web_search_enabled: bool,
     emit: impl Fn(&str, String) -> Result<(), String>,
 ) -> Result<String, String> {
-    let context = tokio::time::timeout(
+    let system_prompt = if web_search_enabled {
+        format!(
+            "{system_prompt}\n\n{}\n{}",
+            web_search::ANSWER_PROMPT,
+            web_search::time_context()
+        )
+    } else {
+        system_prompt.to_string()
+    };
+    let mut context = tokio::time::timeout(
         Duration::from_secs(600),
         memory::prepare(
             messages,
             prior,
-            system_prompt.len(),
+            system_prompt.len()
+                + if web_search_enabled {
+                    web_search::CONTEXT_RESERVE
+                } else {
+                    0
+                },
             thinking.max_tokens() as usize,
             |input| {
                 let emit = &emit;
@@ -180,6 +196,11 @@ async fn run_chat(
     )
     .await
     .map_err(|_| "上下文压缩超时，已保留原文与完成的摘要，可重试继续。")??;
+    if web_search_enabled {
+        emit("answering", String::new())?;
+        let research = web_search::research(key, &context, &emit).await?;
+        research.augment(&mut context);
+    }
     emit("answering", String::new())?;
     tokio::time::timeout(
         Duration::from_secs(thinking.timeout_seconds()),
@@ -187,7 +208,7 @@ async fn run_chat(
             key,
             &context,
             thinking,
-            system_prompt,
+            &system_prompt,
             thinking.max_tokens(),
             |piece| match piece {
                 StreamPiece::Content(text) => emit("delta", text),
@@ -233,7 +254,7 @@ impl SseDecoder {
         Ok(events)
     }
 }
-fn http_error(code: u16) -> String {
+pub(crate) fn http_error(code: u16) -> String {
     let message = match code {
         401 => "API Key 无效或已撤销，请在设置中更换。",
         402 => "DeepSeek 账户余额不足，请在官网检查余额。",
@@ -355,6 +376,49 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    #[ignore = "Billable official model and Search APIs; synthetic question only"]
+    async fn live_web_search_answer() {
+        use std::cell::RefCell;
+        let key = credentials::read().unwrap().expect("Save an API key first");
+        let answer = RefCell::new(String::new());
+        let sources = RefCell::new(Vec::<web_search::Source>::new());
+        let queries = RefCell::new(0usize);
+        let thinking_received = RefCell::new(false);
+        let result = run_chat(&key, &[Message {
+            role: "user".into(),
+            content: "请联网检索 Rust 官方文档，概括所有权（ownership）的作用，回答不超过80字并标注来源编号。".into(),
+        }], None, Thinking::Low, "你是一个中文技术助手，请根据实际搜索资料简洁回答。", true,
+        |kind, text| {
+            match kind {
+                "delta" => answer.borrow_mut().push_str(&text),
+                "thinking" => *thinking_received.borrow_mut() = true,
+                "sources" => *sources.borrow_mut() = serde_json::from_str(&text).unwrap(),
+                "search_status" if text.starts_with("正在搜索：") => *queries.borrow_mut() += 1,
+                _ => {},
+            }
+            Ok(())
+        }).await;
+        let cited_sources: Vec<usize> = sources
+            .borrow()
+            .iter()
+            .filter(|source| answer.borrow().contains(&format!("[{}]", source.id)))
+            .map(|source| source.id)
+            .collect();
+        let passed = result.as_deref() == Ok("stop") && !cited_sources.is_empty();
+        std::fs::create_dir_all("../artifacts/local").unwrap();
+        std::fs::write("../artifacts/local/web-search-live.json", serde_json::to_vec_pretty(&serde_json::json!({
+            "passed":passed,"syntheticQuestion":true,"searchCalls":*queries.borrow(),
+            "sourceCount":sources.borrow().len(),"sourceUrls":sources.borrow().iter().map(|s| &s.url).collect::<Vec<_>>(),
+            "answerCharacters":answer.borrow().chars().count(),"citationReceived":!cited_sources.is_empty(),
+            "citedSourceIds":cited_sources,
+            "thinkingProgressReceived":*thinking_received.borrow(),"result":result
+        })).unwrap()).unwrap();
+        assert!(
+            passed,
+            "Live search failed; see artifacts/local/web-search-live.json"
+        );
+    }
     #[tokio::test]
     #[ignore = "Two billable official API calls; synthetic context and smaller test budget"]
     async fn live_context_memory() {

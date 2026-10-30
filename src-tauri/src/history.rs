@@ -15,6 +15,12 @@ pub struct SavedMessage {
     note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    web_search: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    search_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<crate::web_search::Source>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +60,14 @@ impl Archive {
             }
             let mut message_ids = HashSet::new();
             for m in &session.messages {
+                if m.sources.len() > crate::web_search::MAX_SOURCES
+                    || m.sources.iter().any(|s| !s.valid())
+                    || m.sources.iter().map(|s| s.id).collect::<HashSet<_>>().len()
+                        != m.sources.len()
+                    || m.search_note.as_ref().is_some_and(|n| n.len() > 1024)
+                {
+                    return Err("历史检索来源格式异常，原文件已保留。".into());
+                }
                 if m.id.is_empty()
                     || m.id.len() > 80
                     || !message_ids.insert(&m.id)
@@ -158,6 +172,27 @@ mod tests {
         std::fs::write(&path, b"broken json").unwrap();
         assert!(store.load().is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"broken json");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn search_sources_survive_restart_and_invalid_links_do_not_overwrite_history() {
+        let dir = storage::test_dir();
+        let store = HistoryStore::new(dir.join("history.json"));
+        let mut archive: Archive = serde_json::from_value(serde_json::json!({
+            "version":1,"activeSessionId":"a","sessions":[{"id":"a","title":"联网","createdAt":1,"updatedAt":2,
+            "messages":[{"id":"m","role":"assistant","text":"依据[1]","status":"complete","webSearch":true,
+            "searchNote":"已检索 1 次 · 找到 1 个来源","sources":[{"id":1,"title":"Rust","url":"https://www.rust-lang.org/","snippet":"官方"}]}]}]
+        })).unwrap();
+        store.save(&archive).unwrap();
+        let restored = store.load().unwrap().unwrap();
+        assert_eq!(restored.sessions[0].messages[0].web_search, Some(true));
+        assert_eq!(restored.sessions[0].messages[0].sources[0].id, 1);
+        archive.sessions[0].messages[0].sources[0].url = "file:///C:/Windows".into();
+        assert!(store.save(&archive).is_err());
+        assert_eq!(
+            store.load().unwrap().unwrap().sessions[0].messages[0].sources[0].url,
+            "https://www.rust-lang.org/"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

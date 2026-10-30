@@ -16,6 +16,7 @@ import {
   X,
   History,
   ArrowDown,
+  Globe,
 } from "lucide-react";
 import { command, desktop, type WindowStatus } from "./native";
 import { useChat } from "./useChat";
@@ -24,6 +25,7 @@ import { CopyButton, MessageContent } from "./MessageContent";
 import { HistoryPanel } from "./HistoryPanel";
 import { useAppearance, type Appearance } from "./useAppearance";
 import { useFollowOutput } from "./useFollowOutput";
+import { SearchSources } from "./SearchSources";
 import {
   ThinkingPicker,
   PromptSettings,
@@ -50,13 +52,13 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const appearance = useAppearance();
   const [draft, setDraft] = useState("");
-  const chat = useChat();
-  const { messages, streaming } = chat;
   const [model, setModel] = useState<ModelStatus | null>(null);
   const [assistant, setAssistant] = useState<AssistantSettingsInfo | null>(
     null,
   );
   const [savingThinking, setSavingThinking] = useState(false);
+  const chat = useChat(assistant?.webSearch ?? false);
+  const { messages, streaming } = chat;
   const scroll = useFollowOutput(
     messages,
     chat.activeSessionId,
@@ -91,6 +93,18 @@ export default function App() {
     await run(async () => {
       setAssistant(
         await command<AssistantSettingsInfo>("set_thinking", { thinking }),
+      );
+    });
+    setSavingThinking(false);
+  }
+  async function changeWebSearch() {
+    if (!assistant || savingThinking || streaming) return;
+    setSavingThinking(true);
+    await run(async () => {
+      setAssistant(
+        await command<AssistantSettingsInfo>("set_web_search", {
+          enabled: !assistant.webSearch,
+        }),
       );
     });
     setSavingThinking(false);
@@ -347,12 +361,20 @@ export default function App() {
                               ? "正在停止…"
                               : chat.compacting
                                 ? "正在整理会话记忆…"
-                                : m.text
-                                  ? "正在生成…"
-                                  : m.thinking
-                                    ? "正在思考…"
-                                    : "正在等待 DeepSeek…"}
+                                : chat.searchStatus
+                                  ? chat.searchStatus
+                                  : m.text
+                                    ? "正在生成…"
+                                    : m.thinking
+                                      ? "正在思考…"
+                                      : "正在等待 DeepSeek…"}
                           </span>
+                        )}
+                        {m.role === "assistant" && (
+                          <SearchSources
+                            sources={m.sources}
+                            note={m.searchNote}
+                          />
                         )}
                         {m.role === "assistant" && m.status !== "streaming" && (
                           <span
@@ -434,12 +456,23 @@ export default function App() {
                     }}
                   />
                   <div className="composer-bottom">
-                    <span className="model-label">
-                      <span />
-                      {model?.hasKey
-                        ? "DeepSeek Flash"
-                        : "先在设置中配置 API Key"}
-                    </span>
+                    <button
+                      className={`web-search-toggle ${assistant?.webSearch ? "enabled" : ""}`}
+                      role="switch"
+                      aria-label="联网搜索"
+                      aria-checked={assistant?.webSearch ?? false}
+                      title="允许模型检索网页并引用来源；使用现有 DeepSeek Key，搜索按官方规则计费"
+                      disabled={
+                        !desktop || !assistant || streaming || savingThinking
+                      }
+                      onClick={() => void changeWebSearch()}
+                    >
+                      <Globe size={14} />
+                      联网搜索
+                      <span className="search-toggle-state">
+                        {assistant?.webSearch ? "已开启" : "关闭"}
+                      </span>
+                    </button>
                     <button
                       className="send"
                       title={streaming ? "停止生成" : "发送消息"}
@@ -465,7 +498,9 @@ export default function App() {
                 <p className="composer-hint">
                   {streaming
                     ? "正在流式回答 · 可随时停止"
-                    : "Enter 发送 · Shift + Enter 换行 · 历史保存在本机"}
+                    : assistant?.webSearch
+                      ? "联网已开启 · 自动检索并附来源 · 按官方规则计费"
+                      : "Enter 发送 · Shift + Enter 换行 · 历史保存在本机"}
                 </p>
               </div>
             </>

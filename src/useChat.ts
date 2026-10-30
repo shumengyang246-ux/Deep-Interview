@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { command } from "./native";
-import { buildContext, type ChatMessage, type SessionMemory } from "./chatData";
+import {
+  buildContext,
+  parseSources,
+  type ChatMessage,
+  type SessionMemory,
+} from "./chatData";
 import { useConversations } from "./useConversations";
 type StreamEvent = {
   requestId: string;
@@ -13,15 +18,19 @@ type StreamEvent = {
     | "cancelled"
     | "compacting"
     | "memory"
+    | "search_status"
+    | "search_complete"
+    | "sources"
     | "answering";
   text: string;
 };
-export function useChat() {
+export function useChat(webSearch = false) {
   const conversations = useConversations();
   const { messages, setMessages } = conversations;
   const [streaming, setStreaming] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [compacting, setCompacting] = useState(false);
+  const [searchStatus, setSearchStatus] = useState("");
   const active = useRef<{
     id: string;
     accepted: boolean;
@@ -49,10 +58,17 @@ export function useChat() {
     setStreaming(true);
     setStopping(false);
     setCompacting(false);
+    setSearchStatus("");
     setMessages([
       ...history,
       question,
-      { id: assistantId, role: "assistant", text: "", status: "streaming" },
+      {
+        id: assistantId,
+        role: "assistant",
+        text: "",
+        status: "streaming",
+        webSearch,
+      },
     ]);
     const finish = (status: ChatMessage["status"], note: string) => {
       if (active.current?.id !== id) return;
@@ -63,13 +79,34 @@ export function useChat() {
       setStreaming(false);
       setStopping(false);
       setCompacting(false);
+      setSearchStatus("");
     };
     const channel = new Channel<StreamEvent>();
     channel.onmessage = (event) => {
       if (event.requestId !== active.current?.id) return;
       if (event.kind === "compacting") setCompacting(true);
       else if (event.kind === "answering") setCompacting(false);
-      else if (event.kind === "memory") {
+      else if (event.kind === "search_status") setSearchStatus(event.text);
+      else if (event.kind === "search_complete") {
+        setSearchStatus("");
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId ? { ...m, searchNote: event.text } : m,
+          ),
+        );
+      } else if (event.kind === "sources") {
+        try {
+          const sources = parseSources(event.text);
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantId ? { ...m, sources } : m)),
+          );
+        } catch {
+          request.cancel = true;
+          finish("error", "检索来源格式无效，已停止回答，请重试。");
+          if (request.accepted)
+            void command("cancel_chat", { requestId: id }).catch(() => {});
+        }
+      } else if (event.kind === "memory") {
         try {
           conversations.setMemory(
             sessionId,
@@ -90,7 +127,12 @@ export function useChat() {
             m.id === assistantId ? { ...m, thinking: true } : m,
           ),
         );
-      else finish(event.kind === "done" ? "complete" : event.kind, event.text);
+      else if (
+        event.kind === "done" ||
+        event.kind === "error" ||
+        event.kind === "cancelled"
+      )
+        finish(event.kind === "done" ? "complete" : event.kind, event.text);
     };
     try {
       await command("start_chat", {
@@ -138,6 +180,7 @@ export function useChat() {
     streaming,
     stopping,
     compacting,
+    searchStatus,
     send,
     retry,
     stop,
